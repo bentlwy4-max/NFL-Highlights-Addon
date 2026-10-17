@@ -139,7 +139,13 @@ builder.defineMetaHandler(async ({ id }) => {
 
 builder.defineStreamHandler(async ({ id }) => {
   if (!id.startsWith("nflhl:")) return { streams: [] };
-  return { streams: [{ ytId: id.slice(6), title: "Watch on YouTube" }] };
+  const vid = id.slice(6);
+  return {
+    streams: [
+      { externalUrl: `https://www.youtube.com/watch?v=${vid}`, title: "Open in YouTube" },
+      { ytId: vid, title: "Play (YouTube player)" },
+    ],
+  };
 });
 
 serveHTTP(builder.getInterface(), { port: PORT });
