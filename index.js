@@ -1,129 +1,136 @@
 const { addonBuilder, serveHTTP } = require("stremio-addon-sdk");
 
-// Official NFL YouTube channel. Override with env vars if needed.
-const CHANNEL_ID = process.env.CHANNEL_ID || "UCDVYQ4Zhbm3S2dlz7P1GBDg";
-const KEYWORD = (process.env.KEYWORD || "highlights").toLowerCase();
-const API_KEY = process.env.YOUTUBE_API_KEY || ""; // optional, gives deeper history
+const API_KEY = process.env.YOUTUBE_API_KEY || "AIzaSyDPoage3uPPmJoRUmeUUk2A0mFTXcQFaPw";
 const PORT = process.env.PORT || 7000;
 const CACHE_MS = 30 * 60 * 1000;
+const PAGES = parseInt(process.env.PAGES || "10", 10); // 50 videos per page
+const KEYWORDS = (process.env.KEYWORDS || "highlight,recap")
+  .toLowerCase()
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+// One catalog per sport. "handle" is the YouTube @handle of the official channel.
+const SPORTS = [
+  { id: "nfl-highlights", name: "NFL Highlights", handle: "NFL" },
+  { id: "nba-highlights", name: "NBA Highlights", handle: "NBA" },
+  { id: "mlb-highlights", name: "MLB Highlights", handle: "MLB" },
+  { id: "nhl-highlights", name: "NHL Highlights", handle: "NHL" },
+  { id: "epl-highlights", name: "Premier League Highlights", handle: "premierleague" },
+  { id: "mls-highlights", name: "MLS Highlights", handle: "MLS" },
+];
 
 const manifest = {
-  id: "community.nfl.highlights",
-  version: "1.0.0",
-  name: "NFL Highlights",
-  description: "Highlight videos from the official NFL YouTube channel.",
+  id: "community.nfl.highlights", // kept the same so existing collections still link up
+  version: "2.0.0",
+  name: "Sports Highlights",
+  description: "Highlight videos from official sports YouTube channels.",
   resources: ["catalog", "meta", "stream"],
   types: ["movie"],
-  idPrefixes: ["nflhl:"],
-  catalogs: [
-    {
-      type: "movie",
-      id: "nfl-highlights",
-      name: "NFL Highlights",
-      extra: [{ name: "search", isRequired: false }],
-    },
-  ],
+  idPrefixes: ["hl:", "nflhl:"],
+  catalogs: SPORTS.map((s) => ({
+    type: "movie",
+    id: s.id,
+    name: s.name,
+    extra: [{ name: "search", isRequired: false }],
+  })),
 };
 
-const decode = (s) =>
-  s
-    .replace(/&amp;/g, "&")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">");
+if (!API_KEY) console.error("WARNING: YOUTUBE_API_KEY is not set. Catalogs will be empty.");
 
-// --- Source 1: public RSS feed (latest ~15 uploads, no key needed) ---
-async function fetchRss() {
-  const url = `https://www.youtube.com/feeds/videos.xml?channel_id=${CHANNEL_ID}`;
-  const xml = await (await fetch(url)).text();
-  const entries = xml.split("<entry>").slice(1);
-  return entries.map((e) => {
-    const pick = (re) => (e.match(re) || [])[1] || "";
-    return {
-      id: pick(/<yt:videoId>(.*?)<\/yt:videoId>/),
-      title: decode(pick(/<title>(.*?)<\/title>/)),
-      published: pick(/<published>(.*?)<\/published>/),
-      thumb: pick(/<media:thumbnail url="(.*?)"/),
-      description: decode(pick(/<media:description>([\s\S]*?)<\/media:description>/)),
-    };
-  });
+// ---------- YouTube API helpers ----------
+async function api(path, params) {
+  const qs = new URLSearchParams({ ...params, key: API_KEY });
+  const res = await fetch(`https://www.googleapis.com/youtube/v3/${path}?${qs}`);
+  const data = await res.json();
+  if (data.error) throw new Error(`${path}: ${data.error.message}`);
+  return data;
 }
 
-// --- Source 2: YouTube Data API uploads playlist (up to ~200 videos) ---
-async function getUploadsPlaylist() {
-  // If CHANNEL_ID is set explicitly in the environment, use it.
-  if (process.env.CHANNEL_ID) return "UU" + process.env.CHANNEL_ID.slice(2);
-  // Otherwise look the channel up by its @handle (default: NFL).
-  const handle = process.env.CHANNEL_HANDLE || "NFL";
-  const url =
-    "https://www.googleapis.com/youtube/v3/channels" +
-    `?part=contentDetails&forHandle=${encodeURIComponent(handle)}&key=${API_KEY}`;
-  const data = await (await fetch(url)).json();
-  if (data.error) throw new Error("Channel lookup: " + data.error.message);
+const uploadsCache = {};
+async function getUploads(handle) {
+  if (uploadsCache[handle]) return uploadsCache[handle];
+  const data = await api("channels", { part: "contentDetails", forHandle: handle });
   const item = (data.items || [])[0];
-  if (!item) throw new Error(`No channel found for handle @${handle}`);
-  return item.contentDetails.relatedPlaylists.uploads;
+  if (!item) throw new Error(`No channel found for @${handle}`);
+  uploadsCache[handle] = item.contentDetails.relatedPlaylists.uploads;
+  return uploadsCache[handle];
 }
 
-async function fetchApi() {
-  const playlistId = await getUploadsPlaylist();
+const toVideo = (s, id) => ({
+  id,
+  title: s.title || "",
+  published: s.publishedAt || "",
+  thumb:
+    ((s.thumbnails && (s.thumbnails.high || s.thumbnails.medium || s.thumbnails.default)) || {})
+      .url || "",
+});
+
+async function fetchSport(sport) {
+  const playlistId = await getUploads(sport.handle);
   const out = [];
   let pageToken = "";
-  for (let page = 0; page < 4; page++) {
-    const url =
-      "https://www.googleapis.com/youtube/v3/playlistItems" +
-      `?part=snippet&maxResults=50&playlistId=${playlistId}&key=${API_KEY}` +
-      (pageToken ? `&pageToken=${pageToken}` : "");
-    const data = await (await fetch(url)).json();
-    if (data.error) throw new Error("Playlist fetch: " + data.error.message);
+  for (let i = 0; i < PAGES; i++) {
+    const params = { part: "snippet", maxResults: "50", playlistId };
+    if (pageToken) params.pageToken = pageToken;
+    const data = await api("playlistItems", params);
     for (const it of data.items || []) {
       const s = it.snippet;
-      out.push({
-        id: s.resourceId.videoId,
-        title: s.title,
-        published: s.publishedAt,
-        thumb: (s.thumbnails.high || s.thumbnails.default || {}).url || "",
-        description: s.description || "",
-      });
+      if (!s || !s.resourceId) continue;
+      out.push(toVideo(s, s.resourceId.videoId));
     }
     pageToken = data.nextPageToken;
     if (!pageToken) break;
   }
-  return out;
+  return out.filter((v) => KEYWORDS.some((k) => v.title.toLowerCase().includes(k)));
 }
 
-let cache = { at: 0, videos: [] };
-
-async function getVideos() {
-  if (Date.now() - cache.at < CACHE_MS && cache.videos.length) return cache.videos;
+// ---------- Per-sport cache ----------
+const caches = {};
+async function getSportVideos(sport) {
+  const c = caches[sport.id];
+  if (c && Date.now() - c.at < CACHE_MS && c.videos.length) return c.videos;
   try {
-    const all = API_KEY ? await fetchApi() : await fetchRss();
-    cache = {
-      at: Date.now(),
-      videos: all.filter((v) => v.id && v.title.toLowerCase().includes(KEYWORD)),
-    };
+    caches[sport.id] = { at: Date.now(), videos: await fetchSport(sport) };
   } catch (err) {
-    console.error("Fetch failed:", err.message);
+    console.error(`Fetch failed for ${sport.name}:`, err.message);
   }
-  return cache.videos;
+  return (caches[sport.id] && caches[sport.id].videos) || [];
 }
 
+async function getVideoById(vid) {
+  for (const c of Object.values(caches)) {
+    const v = c.videos.find((x) => x.id === vid);
+    if (v) return v;
+  }
+  try {
+    const data = await api("videos", { part: "snippet", id: vid });
+    const it = (data.items || [])[0];
+    return it ? toVideo(it.snippet, vid) : null;
+  } catch (err) {
+    return null;
+  }
+}
+
+// ---------- Addon handlers ----------
 const toMeta = (v) => ({
-  id: "nflhl:" + v.id,
+  id: "hl:" + v.id,
   type: "movie",
   name: v.title,
   poster: v.thumb,
   posterShape: "landscape",
   background: v.thumb,
-  description: v.description,
   releaseInfo: v.published ? v.published.slice(0, 10) : undefined,
 });
 
+const videoIdFrom = (id) => id.split(":").pop();
+
 const builder = new addonBuilder(manifest);
 
-builder.defineCatalogHandler(async ({ extra }) => {
-  let videos = await getVideos();
+builder.defineCatalogHandler(async ({ id, extra }) => {
+  const sport = SPORTS.find((s) => s.id === id);
+  if (!sport) return { metas: [] };
+  let videos = await getSportVideos(sport);
   if (extra && extra.search) {
     const q = extra.search.toLowerCase();
     videos = videos.filter((v) => v.title.toLowerCase().includes(q));
@@ -132,14 +139,12 @@ builder.defineCatalogHandler(async ({ extra }) => {
 });
 
 builder.defineMetaHandler(async ({ id }) => {
-  const videos = await getVideos();
-  const v = videos.find((x) => "nflhl:" + x.id === id);
+  const v = await getVideoById(videoIdFrom(id));
   return { meta: v ? toMeta(v) : null };
 });
 
 builder.defineStreamHandler(async ({ id }) => {
-  if (!id.startsWith("nflhl:")) return { streams: [] };
-  const vid = id.slice(6);
+  const vid = videoIdFrom(id);
   return {
     streams: [
       { externalUrl: `https://www.youtube.com/watch?v=${vid}`, title: "Open in YouTube" },
@@ -149,4 +154,4 @@ builder.defineStreamHandler(async ({ id }) => {
 });
 
 serveHTTP(builder.getInterface(), { port: PORT });
-console.log(`NFL Highlights addon running: http://localhost:${PORT}/manifest.json`);
+console.log(`Sports Highlights addon running: http://localhost:${PORT}/manifest.json`);
