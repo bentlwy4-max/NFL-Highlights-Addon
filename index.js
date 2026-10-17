@@ -51,8 +51,23 @@ async function fetchRss() {
 }
 
 // --- Source 2: YouTube Data API uploads playlist (up to ~200 videos) ---
+async function getUploadsPlaylist() {
+  // If CHANNEL_ID is set explicitly in the environment, use it.
+  if (process.env.CHANNEL_ID) return "UU" + process.env.CHANNEL_ID.slice(2);
+  // Otherwise look the channel up by its @handle (default: NFL).
+  const handle = process.env.CHANNEL_HANDLE || "NFL";
+  const url =
+    "https://www.googleapis.com/youtube/v3/channels" +
+    `?part=contentDetails&forHandle=${encodeURIComponent(handle)}&key=${API_KEY}`;
+  const data = await (await fetch(url)).json();
+  if (data.error) throw new Error("Channel lookup: " + data.error.message);
+  const item = (data.items || [])[0];
+  if (!item) throw new Error(`No channel found for handle @${handle}`);
+  return item.contentDetails.relatedPlaylists.uploads;
+}
+
 async function fetchApi() {
-  const playlistId = "UU" + CHANNEL_ID.slice(2);
+  const playlistId = await getUploadsPlaylist();
   const out = [];
   let pageToken = "";
   for (let page = 0; page < 4; page++) {
@@ -61,6 +76,7 @@ async function fetchApi() {
       `?part=snippet&maxResults=50&playlistId=${playlistId}&key=${API_KEY}` +
       (pageToken ? `&pageToken=${pageToken}` : "");
     const data = await (await fetch(url)).json();
+    if (data.error) throw new Error("Playlist fetch: " + data.error.message);
     for (const it of data.items || []) {
       const s = it.snippet;
       out.push({
