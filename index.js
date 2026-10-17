@@ -12,7 +12,7 @@ const KEYWORDS = (process.env.KEYWORDS || "highlight,recap")
 
 // One catalog per sport. "handle" is the YouTube @handle of the official channel.
 const SPORTS = [
-  { id: "nfl-highlights", name: "NFL Highlights", handle: "NFL" },
+  { id: "nfl-highlights", name: "NFL Highlights", handle: "NFL", keywords: ["highlights"], exclude: ["recap"] },
   { id: "nba-highlights", name: "NBA Highlights", handle: "NBA" },
   { id: "mlb-highlights", name: "MLB Highlights", handle: "MLB" },
   { id: "nhl-highlights", name: "NHL Highlights", handle: "NHL" },
